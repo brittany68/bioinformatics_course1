@@ -1,0 +1,101 @@
+#!/bin/bash
+#Run fastq on raw data
+fastqc -t4 /home/ubuntu/ngs_course/dnaseq_pipeline/data/untrimmed_fastq/NGS.0001.R1.fastq.gz \ /home/ubuntu/ngs_course/dnaseq_pipeline/data/untrimmed_fastq/NGS.0001.R2.fastq.gz
+
+#Run Trimmomatic on fastq reads to perform trimming
+trimmomatic PE  \
+          -threads 4 \
+            -phred33 \
+              $1 $2 \
+                -baseout ~/ngs_course/dnaseq_pipeline/data/trimmed_fastq/trimmed_data \
+                  ILLUMINACLIP:/home/ubuntu/anaconda3/pkgs/trimmomatic-0.39-1/share/trimmomatic-0.39-1/adapters/NexteraPE-PE.fa:2:30:10 \
+                    TRAILING:25 MINLEN:50
+#Run fastq on raw data
+fastqc -t 4 /home/ubuntu/ngs_course/dnaseq_pipeline/data/trimmed_fastq/NGS.0001_trimmed_R_1P.fastq \ /home/ubuntu/ngs_course/dnaseq_pipeline/data/trimmed_fastq/NGS.0001_trimmed_R_2P.fastq
+
+mkdir ~/ngs_course/dnaseq_pipeline/results/fastqc_trimmed_reads
+
+mv ~/ngs_course/dnaseq_pipeline/data/trimmed_fastq/*fastqc* ~/ngs_course/dnaseq_pipeline/results/fastqc_trimmed_reads/
+#Alignment
+bwa index home/ubuntu/ngs_course/dnaseq_pipeline/data/reference
+mkdir ~/ngs_course/dnaseq_pipeline/data
+#Alignment on trimmed Data
+bwa mem -t 4 -v 1 -R '@RG\tID:HWI-D0011.50.H7AP8ADXX.1.WES01\tSM:WES01\tPL:ILLUMINA\tLB:nextera-wes01-blood\tDT:2017-02-23\tPU:HWI-D00119' -I 250,50  ~/ngs_course/dnaseq_pipeline/data/reference/hg19.fa.gz ~/ngs_course/dnaseq_pipeline/data/trimmed_fastq/NGS.0001_trimmed_R_1P.fastq   ~/ngs_course/dnaseq_pipeline/data/trimmed_fastq/NGS.0001_trimmed_R_2P.fastq > ~/ngs_course/dnaseq_pipeline/data/aligned_data/NGS001.sam
+# Sort sam, convert to bam, moves us to where sam file was stored, changes sam file to bam
+cd ~/ngs_course/dnaseq_pipeline/data/aligned_data
+samtools view -h -b NGS001.sam > NGS001.bam
+#sorts bam file by sequences for reads
+samtools sort NGS001.bam > NGS001_sorted.bam
+#generates index file
+samtools index NGS001_sorted.bam
+
+#Basic Alignment post processing
+
+#Marking Duplicates
+picard MarkDuplicatesI=NGS001_sorted.bam O=NGS001_sorted_marked.bam M=marked_dup_metrics.txt
+#allows effiecnt look-up of compiled data in sorted and marked bam
+samtools index NGS001_sorted_marked.bam
+
+#Quality Filtering Duplicates
+samtools view -F 1796  -q 20 -o NGS001_sorted_filtered.bam NGS001_sorted_marked.bam
+#index new filtered bam file
+samtools index NGS001_sorted_filtered.bam
+#Generate Standard Alignment Statistics
+
+#Flagstats
+samtools flagstat NGS001_sorted_filtered.bam
+
+#idxstats
+samtools idxstats NGS001_sorted_filtered.bam
+
+#bedtools
+ coverageBed -d -a annotation.bed -b NGS001_sorted_marked.bam > depth.txt
+ $ bedtools coverage -a annotation.bed -b NGS001_sorted_marked.bam
+
+ #CollectInsertSize
+ picard CollectInsertSizeMetrics \
+         I=NGS001_sorted_filtered.bam \
+         O=insert_size_metrics.txt \
+         H=insert_size_histogram.pdf \
+         M=0.5
+
+ #Basic Variant Calling
+
+ #Call Variants Using Freebayes
+ samtools faidx ~/ngs_course/dnaseq_pipeline/data/reference/
+ freebayes --bam ~/ngs_course/dnaseq_pipeline/data/aligned_data/NGS001_sorted_filtered.bam --fasta-reference ~/ngs_course/dnaseq_pipeline/data/reference/hg.fa.gz --vcf ~/ngs_course/dnaseq_pipeline/results/NGS001.vcf
+ # compress vcf file
+ bgzip ~/ngs_course/dnaseq_pipeline/results/NGS001.vcf
+ #index the vcf results into results directory
+ tabix -p vcf ~/ngs_course/dnaseq_pipeline/results/NGS001.vcf.gz
+#Quality Filter Variants
+ vcffilter -f "QUAL > 1 & QUAL / AO > 10 & SAF > 0 & SAR > 0 & RPR > 1 & RPL > 1" ~/ngs_course/dnaseq_pipeline/results/NGS001.vcf.gz > ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered.vcf
+# compress resulting variant file
+bgzip ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_NGS001.vcf
+#Index VCF File
+tabix -p vcf ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_NGS001.vcf.gz
+
+#Variant Annotation
+#unpack and set up annovar in command line
+tar -zxvf annovar.latest.tar.gz
+#Annotate variants using ANNOVAR
+./convert2annovar.pl -format vcf4 ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_NGS001.vcf.gz > ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_annotation.avinput
+#Run annovar table function and convert to csv format
+./table_annovar.pl ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_annotation.avinput humandb/ -buildver hg19 -out ~/ngs_course/dnaseq_pipeline/results/NGS001_filtered_NGS001 -remove -protocol refGene,ensGene,clinvar_20180603,exac03,dbnsfp31a_interpro -operation g,g,f,f,f -otherinfo -nastring . -csvout
+#snpEff
+# Download latest version of snpEff
+wget https://snpeff.blob.core.windows.net/versions/snpEff_latest_core.zip
+#Unzip download and install
+unzip snpEff_latest_core.zip
+#Download reference database
+java -jar snpEff.jar download GRCh37.7
+#Move to snpEff directory
+~ cd snpEff
+#Run snpEff
+~/ snpEff$ java -Xmx4g home/ubuntu/snpEff/snpEff.jar -c home/ubuntu/snpEff/snpEff.confi GRCh37.7 home/ubuntu/ngs_course/dnaseq_pipeline/results/NGS001_filtered_annotation.vcf
+#Filter Rare Variants
+bcftools view -i ‘AF < 0.01’ && ~/ngs_course/dnaseq_pipeline/data/reference/hg.ga.gz
+=.’ NGS001_filtered_annotation.vcf > rare_variants.vcf
+#Filters variants with allele frequency < .01 and filters variants to display only those in coding regions
+
+
